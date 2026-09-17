@@ -436,6 +436,16 @@ static esp_err_t mac_set_peer_pause_ability(esp_eth_mac_t *mac, uint32_t ability
 static esp_err_t mac_enable_flow_ctrl(esp_eth_mac_t *mac, bool enable)  { return ESP_OK; }
 static esp_err_t mac_set_all_multicast(esp_eth_mac_t *mac, bool enable) { return ESP_OK; }
 
+/* No selective filtering hardware -- every frame that crosses the
+ * link is already delivered upward regardless of destination address,
+ * so "add/remove a filter entry" is inherently a no-op success: the
+ * address would have been received and passed up either way. Without
+ * these, esp_eth's core logs "add mac address to filter not
+ * supported" whenever lwIP tries to join a multicast group (IGMP,
+ * mDNS, IPv6 neighbor discovery, DHCP server's multicast use, etc.). */
+static esp_err_t mac_add_mac_filter(esp_eth_mac_t *mac, uint8_t *addr) { (void)mac; (void)addr; return ESP_OK; }
+static esp_err_t mac_rm_mac_filter(esp_eth_mac_t *mac, uint8_t *addr) { (void)mac; (void)addr; return ESP_OK; }
+
 static esp_err_t mac_read_phy_reg(esp_eth_mac_t *mac, uint32_t phy_addr, uint32_t phy_reg, uint32_t *reg_value)
 {
     /* No MDIO bus -- there's no real PHY to read. */
@@ -496,6 +506,8 @@ esp_eth_mac_t *esp_eth_mac_new_esp32link_spi(const esp32link_spi_config_t *link_
     emac->parent.set_peer_pause_ability  = mac_set_peer_pause_ability;
     emac->parent.enable_flow_ctrl        = mac_enable_flow_ctrl;
     emac->parent.set_all_multicast       = mac_set_all_multicast;
+    emac->parent.add_mac_filter          = mac_add_mac_filter;
+    emac->parent.rm_mac_filter           = mac_rm_mac_filter;
     emac->parent.read_phy_reg            = mac_read_phy_reg;
     emac->parent.write_phy_reg           = mac_write_phy_reg;
     emac->parent.del                     = mac_del;

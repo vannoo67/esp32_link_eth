@@ -173,4 +173,14 @@ overrides:
   the documented ESP-IDF v5.x API surface, but that struct has had
   minor churn across releases. If your build complains about
   missing/extra designated initializers, that's the first place to
-  look.
+  look. One instance of this already found and fixed on real hardware:
+  `add_mac_filter`/`rm_mac_filter` (added to the MAC vtable at some
+  point after the version this driver was first written against)
+  weren't implemented, causing harmless but noisy
+  `"add mac address to filter not supported"` errors whenever lwIP
+  tried to join a multicast group (IGMP, mDNS, IPv6 neighbor
+  discovery, DHCP). Both are now no-op successes, which is correct
+  behavior here: this driver has no selective filtering hardware, so
+  every frame crossing the link is delivered upward regardless of
+  destination address already -- "adding a filter" doesn't need to do
+  anything.

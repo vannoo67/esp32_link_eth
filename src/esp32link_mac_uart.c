@@ -291,6 +291,11 @@ static esp_err_t mac_set_promiscuous(esp_eth_mac_t *mac, bool enable)   { return
 static esp_err_t mac_set_peer_pause_ability(esp_eth_mac_t *mac, uint32_t ability) { return ESP_OK; }
 static esp_err_t mac_enable_flow_ctrl(esp_eth_mac_t *mac, bool enable)  { return ESP_OK; }
 static esp_err_t mac_set_all_multicast(esp_eth_mac_t *mac, bool enable) { return ESP_OK; }
+
+/* See the matching comment in esp32link_mac_spi.c -- same reasoning
+ * applies here. */
+static esp_err_t mac_add_mac_filter(esp_eth_mac_t *mac, uint8_t *addr) { (void)mac; (void)addr; return ESP_OK; }
+static esp_err_t mac_rm_mac_filter(esp_eth_mac_t *mac, uint8_t *addr) { (void)mac; (void)addr; return ESP_OK; }
 static esp_err_t mac_read_phy_reg(esp_eth_mac_t *mac, uint32_t a, uint32_t r, uint32_t *v) { if (v) *v = 0; return ESP_ERR_NOT_SUPPORTED; }
 static esp_err_t mac_write_phy_reg(esp_eth_mac_t *mac, uint32_t a, uint32_t r, uint32_t v) { return ESP_ERR_NOT_SUPPORTED; }
 
@@ -336,6 +341,8 @@ esp_eth_mac_t *esp_eth_mac_new_esp32link_uart(const esp32link_uart_config_t *lin
     emac->parent.set_peer_pause_ability  = mac_set_peer_pause_ability;
     emac->parent.enable_flow_ctrl        = mac_enable_flow_ctrl;
     emac->parent.set_all_multicast       = mac_set_all_multicast;
+    emac->parent.add_mac_filter          = mac_add_mac_filter;
+    emac->parent.rm_mac_filter           = mac_rm_mac_filter;
     emac->parent.read_phy_reg            = mac_read_phy_reg;
     emac->parent.write_phy_reg           = mac_write_phy_reg;
     emac->parent.del                     = mac_del;
