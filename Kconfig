@@ -1,0 +1,155 @@
+menu "ESP32 Link Ethernet (direct board-to-board link)"
+
+    choice ESP32LINK_TRANSPORT
+        prompt "Link transport"
+        default ESP32LINK_TRANSPORT_SPI
+        help
+            How the two ESP32 boards talk to each other directly, in
+            place of a W5500 + Ethernet cable. SPI has more throughput
+            headroom; UART is simpler to wire and has no master/slave
+            asymmetry, but a lower practical ceiling.
+
+        config ESP32LINK_TRANSPORT_SPI
+            bool "SPI"
+        config ESP32LINK_TRANSPORT_UART
+            bool "UART"
+    endchoice
+
+    #
+    # --- SPI transport ---
+    #
+    choice ESP32LINK_SPI_ROLE
+        depends on ESP32LINK_TRANSPORT_SPI
+        prompt "SPI role"
+        default ESP32LINK_SPI_ROLE_MASTER
+        help
+            SPI is inherently asymmetric: exactly one board must be
+            master, the other slave. Set this differently on the two
+            boards you're pairing.
+
+        config ESP32LINK_SPI_ROLE_MASTER
+            bool "Master"
+        config ESP32LINK_SPI_ROLE_SLAVE
+            bool "Slave"
+    endchoice
+
+    config ESP32LINK_SPI_HOST
+        depends on ESP32LINK_TRANSPORT_SPI
+        int "SPI host number"
+        default 1
+        help
+            SPI2_HOST is 1 on most targets, SPI3_HOST is 2. Check
+            soc_caps for your chip if unsure.
+
+    config ESP32LINK_SPI_CLOCK_MHZ
+        depends on ESP32LINK_TRANSPORT_SPI
+        int "SPI clock speed (MHz)"
+        range 1 40
+        default 10
+        help
+            Master role only -- ignored on a slave build (still needs
+            a value defined either way, so it's shown rather than
+            hidden here; "visible if" on a plain config isn't
+            supported by ESP-IDF's Kconfig parser).
+
+            Start conservative (5-10 MHz) on breadboard/jumper wiring;
+            raise it once the link is proven reliable. ESP32's SPI
+            *slave* mode has a lower reliable clock ceiling than
+            master mode (the slave's output settling time becomes the
+            bottleneck as clock rises) -- expect this number to be
+            capped well below what the W5500 builds in these forks run
+            at (up to 80 MHz there, but against a chip built to be a
+            fast SPI slave, on a clean PCB trace).
+
+    config ESP32LINK_SPI_GPIO_MOSI
+        depends on ESP32LINK_TRANSPORT_SPI
+        int "MOSI GPIO"
+        default 6
+
+    config ESP32LINK_SPI_GPIO_MISO
+        depends on ESP32LINK_TRANSPORT_SPI
+        int "MISO GPIO"
+        default 5
+
+    config ESP32LINK_SPI_GPIO_SCLK
+        depends on ESP32LINK_TRANSPORT_SPI
+        int "SCLK GPIO"
+        default 4
+
+    config ESP32LINK_SPI_GPIO_CS
+        depends on ESP32LINK_TRANSPORT_SPI
+        int "CS GPIO"
+        default 7
+
+    config ESP32LINK_SPI_GPIO_HANDSHAKE
+        depends on ESP32LINK_TRANSPORT_SPI
+        int "Handshake / data-ready GPIO"
+        default 3
+        help
+            The slave can't initiate an SPI transaction on its own. It
+            raises this line to tell the master "I have a frame queued,
+            please clock me out". Wire the same GPIO number on both
+            boards, direct wire, no crossover needed (it's an input on
+            the master, output on the slave).
+
+    #
+    # --- UART transport ---
+    #
+    config ESP32LINK_UART_PORT
+        depends on ESP32LINK_TRANSPORT_UART
+        int "UART port number"
+        default 1
+
+    config ESP32LINK_UART_BAUD
+        depends on ESP32LINK_TRANSPORT_UART
+        int "UART baud rate"
+        default 3000000
+        help
+            3 Mbaud is close to the practical ceiling for reliable UART
+            on jumper wiring. After framing/escaping overhead, expect
+            low single-digit Mbps of real frame throughput -- fine for
+            light/IoT traffic, not for saturating a WiFi client.
+
+    config ESP32LINK_UART_GPIO_TX
+        depends on ESP32LINK_TRANSPORT_UART
+        int "TX GPIO"
+        default 6
+
+    config ESP32LINK_UART_GPIO_RX
+        depends on ESP32LINK_TRANSPORT_UART
+        int "RX GPIO"
+        default 5
+
+    config ESP32LINK_UART_FLOW_CTRL
+        depends on ESP32LINK_TRANSPORT_UART
+        bool "Use RTS/CTS hardware flow control"
+        default y
+        help
+            Strongly recommended. Without it, a slow consumer on either
+            side silently drops frames under load instead of applying
+            backpressure.
+
+    config ESP32LINK_UART_GPIO_RTS
+        depends on ESP32LINK_TRANSPORT_UART && ESP32LINK_UART_FLOW_CTRL
+        int "RTS GPIO"
+        default 7
+
+    config ESP32LINK_UART_GPIO_CTS
+        depends on ESP32LINK_TRANSPORT_UART && ESP32LINK_UART_FLOW_CTRL
+        int "CTS GPIO"
+        default 4
+
+    #
+    # --- Protocol ---
+    #
+    config ESP32LINK_PROTOCOL_VERSION
+        int
+        default 1
+        help
+            Bumped whenever the on-wire frame format changes. Both ends
+            exchange this during link bring-up and refuse to proceed on
+            a mismatch, rather than silently corrupting frames. Not a
+            user-facing setting -- change the default here when you
+            change the framing in esp32link_proto.c/h.
+
+endmenu

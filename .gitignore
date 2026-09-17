@@ -1,0 +1,26 @@
+# ESP-IDF build output
+build/
+build_*/
+
+# Generated sdkconfig files (sdkconfig.defaults* are the source of truth)
+sdkconfig
+sdkconfig.w5500_c3
+sdkconfig.wt32
+
+# Managed components (fetched by idf component manager)
+managed_components/
+dependencies.lock
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store

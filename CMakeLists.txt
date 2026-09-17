@@ -1,0 +1,16 @@
+idf_component_register(
+    SRCS
+        "src/esp32link_proto.c"
+        "src/esp32link_mac_spi.c"
+        "src/esp32link_mac_uart.c"
+        "src/esp32link_phy.c"
+    INCLUDE_DIRS
+        "include"
+    PRIV_INCLUDE_DIRS
+        "src"
+    REQUIRES
+        esp_eth
+        driver
+        esp_timer
+        freertos
+)

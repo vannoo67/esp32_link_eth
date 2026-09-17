@@ -1,0 +1,11 @@
+version: "0.1.0"
+description: >
+  esp_eth MAC/PHY driver pair that links two ESP32 boards directly over
+  SPI or UART, standing in for a W5500 + Ethernet cable. Designed to be
+  dropped into esp_eth_driver_install() wherever a chip-specific MAC/PHY
+  pair (e.g. esp_eth_mac_new_w5500 / esp_eth_phy_new_w5500) is normally
+  used, so callers upstream of the MAC/PHY layer (bridging, ProxyARP,
+  lwIP netif glue) need no changes.
+url: "https://github.com/vannoo67/esp32_link_eth"
+dependencies:
+  idf: ">=5.0"
