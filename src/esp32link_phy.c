@@ -26,6 +26,7 @@ typedef struct {
     esp_eth_phy_t parent;
     esp_eth_mediator_t *eth;
     eth_link_t link;
+    eth_link_t last_reported_link; /*!< what get_link() last actually notified, to suppress redundant re-notification on every poll */
 } esp32link_phy_t;
 
 static inline esp32link_phy_t *to_impl(esp_eth_phy_t *phy)
@@ -89,22 +90,28 @@ static esp_err_t phy_autonego_ctrl(esp_eth_phy_t *phy, eth_phy_autoneg_cmd_t cmd
 
 static esp_err_t phy_get_link(esp_eth_phy_t *phy)
 {
-    ESP_LOGI(TAG, "phy_get_link called");
     esp32link_phy_t *impl = to_impl(phy);
-    if (impl->eth) {
+    /* Only notify on an actual state transition, matching phy_set_link
+     * below -- this was previously unconditional, meaning esp_eth core
+     * polling get_link() every check_link_period_ms re-fired
+     * ETH_STATE_LINK/UP once per poll rather than once per real
+     * transition, causing ETHERNET_EVENT_CONNECTED to keep re-firing
+     * in consuming applications long after the link was already up. */
+    if (impl->eth && impl->last_reported_link != impl->link) {
         impl->eth->on_state_changed(impl->eth, ETH_STATE_LINK, (void *)impl->link);
+        impl->last_reported_link = impl->link;
     }
     return ESP_OK;
 }
 
 static esp_err_t phy_set_link(esp_eth_phy_t *phy, eth_link_t link)
 {
-    ESP_LOGI(TAG, "phy_set_link called, link=%d", (int)link);
     esp32link_phy_t *impl = to_impl(phy);
     if (impl->link != link) {
         impl->link = link;
         if (impl->eth) {
             impl->eth->on_state_changed(impl->eth, ETH_STATE_LINK, (void *)impl->link);
+            impl->last_reported_link = impl->link;
         }
     }
     return ESP_OK;
@@ -170,6 +177,7 @@ esp_eth_phy_t *esp_eth_phy_new_esp32link(void)
         return NULL;
     }
     impl->link = ETH_LINK_DOWN;
+    impl->last_reported_link = ETH_LINK_DOWN;
     impl->parent.set_mediator            = phy_set_mediator;
     impl->parent.reset                   = phy_reset;
     impl->parent.reset_hw                = phy_reset_hw;
