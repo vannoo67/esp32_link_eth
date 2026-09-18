@@ -40,6 +40,14 @@ static const char *TAG = "esp32link_mac_uart";
  * real or keepalive -- has arrived in a while. */
 #define KEEPALIVE_INTERVAL_US  (1000 * 1000)  /* send a keepalive after this long with nothing sent */
 #define LINK_TIMEOUT_US        (3000 * 1000)  /* declare link down after this long with nothing received */
+/* Real hardware finding: reporting link-up the instant the peer is
+ * proven alive can fire before the consuming application has finished
+ * registering its own ETH_EVENT handler (esp_event does not buffer
+ * events for later subscribers -- a notification posted before
+ * anything is listening is simply lost). Only the very first "up"
+ * transition since boot is delayed by this; real disconnect/reconnect
+ * afterward reports at full speed, no delay. */
+#define INITIAL_LINK_UP_GRACE_US (3000 * 1000)
 
 typedef struct {
     esp_eth_mac_t parent;
@@ -52,6 +60,8 @@ typedef struct {
     volatile bool link_up;      /*!< MAC-owned link state -- see notify_link() */
     volatile int64_t last_tx_us;
     volatile int64_t last_rx_us;
+    int64_t task_start_us;      /*!< rx_task's start time, for the initial grace period */
+    bool ever_reported_up;      /*!< once true, the grace period no longer applies */
 } esp32link_mac_uart_t;
 
 static inline esp32link_mac_uart_t *to_impl(esp_eth_mac_t *mac)
@@ -147,7 +157,10 @@ static void deliver_envelope(esp32link_mac_uart_t *emac, const uint8_t *envelope
     /* Any validly-framed envelope -- keepalive or real -- is proof the
      * peer is alive and responsive right now. */
     emac->last_rx_us = esp_timer_get_time();
-    notify_link(emac, true);
+    if (emac->ever_reported_up || (emac->last_rx_us - emac->task_start_us) >= INITIAL_LINK_UP_GRACE_US) {
+        notify_link(emac, true);
+        emac->ever_reported_up = true;
+    }
 
     if (len == 0) {
         return; /* keepalive -- nothing to deliver upward */
@@ -176,6 +189,7 @@ static void rx_task(void *arg)
     uint8_t byte;
 
     ESP_LOGI(TAG, "rx_task alive, reading uart port %d", emac->cfg.uart_port);
+    emac->task_start_us = esp_timer_get_time();
 
     while (emac->running) {
         int64_t now = esp_timer_get_time();

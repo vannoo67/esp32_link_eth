@@ -193,11 +193,36 @@ optimistically at driver init.
 **Flagging honestly**: a MAC calling `on_state_changed()` directly,
 rather than a PHY, is not the pattern any real esp_eth driver in
 ESP-IDF uses -- the framework doesn't forbid it (the mediator doesn't
-care which caller invokes it), but it's genuinely atypical usage, and
-this is its first exercise on real hardware. Re-run `loopback_test`
-before trusting this in a router/bridge build: unplug one board
-mid-run and confirm the other side's console logs `link down` within
-a few seconds, then reconnect and confirm `link up` reappears.
+care which caller invokes it), but it's genuinely atypical usage.
+
+**Real hardware finding (confirmed, not theoretical)**: the first
+version of this feature reported link-up as soon as the peer was
+proven alive, which for SPI can be under 20ms from boot. That's too
+fast in practice -- it can fire while the consuming application's
+`router_init()`/`bridge_init()` is still partway through its own setup,
+*before* it has called `esp_event_handler_register(ETH_EVENT, ...)`.
+`esp_event`'s default loop does not buffer events for handlers that
+subscribe later; a notification posted before anything is listening
+is simply lost, with no error anywhere. Symptom observed on real
+hardware: the link and transport were both working correctly (frames
+crossed fine, one very late DHCP relay eventually succeeded), but the
+application never logged `link up` and downstream behavior (DHCP
+clients unable to get a lease in reasonable time) suggested whatever
+the app's own event handler is supposed to do on first connect never
+ran for that boot.
+
+The fix here is a bounded grace period (`INITIAL_LINK_UP_GRACE_US`,
+currently 3s): only the very *first* "up" transition since boot is
+delayed, giving a reasonable application time to finish registering
+its handlers; every subsequent transition (a real disconnect/reconnect
+after that first one) reports at full speed, matching the manual
+unplug-test behavior validated earlier. This is a pragmatic mitigation
+for an event-ordering hazard between this driver and its consumer, not
+a "clean" fix -- the more architecturally correct fix is for the
+consuming application to register its `ETH_EVENT` handler immediately
+after `esp_eth_driver_install()`, before anything else, which is good
+practice regardless of this driver. If you control that application
+code and want to do both, that's not redundant -- it just adds margin.
 
 ## Known gaps / next steps
 

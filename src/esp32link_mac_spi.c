@@ -27,6 +27,7 @@
 #include "esp_log.h"
 #include "esp_check.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include "esp_eth_mac.h"
 #include "esp_eth_com.h"
 #include "esp32link_mac.h"
@@ -59,6 +60,8 @@ typedef struct {
 
     volatile bool link_up;         /*!< MAC-owned link state -- see notify_link() */
     int consecutive_timeouts;      /*!< master/slave task-local; not touched from other tasks */
+    int64_t task_start_us;         /*!< this role's task start time, for the initial grace period */
+    bool ever_reported_up;         /*!< once true, the grace period no longer applies */
 } esp32link_mac_spi_t;
 
 /* Same reasoning and pattern as esp32link_mac_uart.c's notify_link():
@@ -70,6 +73,14 @@ typedef struct {
  * just "transactions are still completing", detected via the timeouts
  * already present in both roles' wait calls below. */
 #define LINK_DOWN_AFTER_CONSECUTIVE_TIMEOUTS  3  /* at ~1s per timeout, matches UART's 3s LINK_TIMEOUT_US */
+/* Real hardware finding: reporting link-up the instant the peer is
+ * proven alive (which for SPI can be under 20ms) can fire before the
+ * consuming application has finished registering its own ETH_EVENT
+ * handler -- esp_event does not buffer events for later subscribers,
+ * so a notification posted before anything is listening is simply
+ * lost. Only the very first "up" transition since boot is delayed by
+ * this; real disconnect/reconnect afterward reports at full speed. */
+#define INITIAL_LINK_UP_GRACE_US (3000 * 1000)
 
 static void notify_link(esp32link_mac_spi_t *emac, bool up)
 {
@@ -81,6 +92,15 @@ static void notify_link(esp32link_mac_spi_t *emac, bool up)
     if (emac->eth) {
         emac->eth->on_state_changed(emac->eth, ETH_STATE_LINK, (void *)(up ? ETH_LINK_UP : ETH_LINK_DOWN));
     }
+}
+
+/* Gate for the very first "up" report -- see INITIAL_LINK_UP_GRACE_US
+ * above. Subsequent up-transitions (after a real disconnect) bypass
+ * this entirely once ever_reported_up is set. */
+static inline bool ok_to_report_up(esp32link_mac_spi_t *emac)
+{
+    return emac->ever_reported_up ||
+           (esp_timer_get_time() - emac->task_start_us) >= INITIAL_LINK_UP_GRACE_US;
 }
 
 static inline esp32link_mac_spi_t *to_impl(esp_eth_mac_t *mac)
@@ -159,6 +179,7 @@ static void master_task(void *arg)
 {
     esp32link_mac_spi_t *emac = arg;
     ESP_LOGI(TAG, "master_task alive, host=%d clock=%u Hz", emac->cfg.spi_host_id, (unsigned)emac->cfg.clock_speed_hz);
+    emac->task_start_us = esp_timer_get_time();
     esp32link_spi_slot_t *tx_slot = heap_caps_malloc(sizeof(esp32link_spi_slot_t), MALLOC_CAP_DMA);
     esp32link_spi_slot_t *rx_slot = heap_caps_malloc(sizeof(esp32link_spi_slot_t), MALLOC_CAP_DMA);
     spi_transaction_t trans;
@@ -216,7 +237,10 @@ static void master_task(void *arg)
          * happen if the slave was genuinely armed and participating,
          * so this is solid proof of life. */
         emac->consecutive_timeouts = 0;
-        notify_link(emac, true);
+        if (ok_to_report_up(emac)) {
+            notify_link(emac, true);
+            emac->ever_reported_up = true;
+        }
         deliver_if_present(emac, rx_slot);
     }
 
@@ -231,6 +255,7 @@ static void slave_task(void *arg)
 {
     esp32link_mac_spi_t *emac = arg;
     ESP_LOGI(TAG, "slave_task alive, host=%d", emac->cfg.spi_host_id);
+    emac->task_start_us = esp_timer_get_time();
     esp32link_spi_slot_t *tx_slot = heap_caps_malloc(sizeof(esp32link_spi_slot_t), MALLOC_CAP_DMA);
     /* Two RX buffers, ping-ponged: while one is being processed in
      * software, the other is safe for the hardware/DMA to fill for
@@ -271,7 +296,10 @@ static void slave_task(void *arg)
             continue; /* still armed and waiting -- handshake stays high */
         }
         emac->consecutive_timeouts = 0;
-        notify_link(emac, true);
+        if (ok_to_report_up(emac)) {
+            notify_link(emac, true);
+            emac->ever_reported_up = true;
+        }
         gpio_set_level(emac->cfg.gpio_handshake, 0); /* consumed; briefly not ready while we re-arm */
 
         int just_completed = active;
