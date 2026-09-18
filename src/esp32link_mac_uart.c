@@ -18,6 +18,7 @@
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_check.h"
+#include "esp_timer.h"
 #include "esp_eth_mac.h"
 #include "esp_eth_com.h"
 #include "esp32link_mac.h"
@@ -32,6 +33,14 @@ static const char *TAG = "esp32link_mac_uart";
 /* Envelope before stuffing: version + len(2) + payload + crc(2) */
 #define ENVELOPE_MAX       (1 + 2 + ESP32LINK_MAX_FRAME_LEN + 2)
 
+/* Link liveness: UART is silent when idle (unlike SPI, which is
+ * always mid-exchange as a side effect of its own protocol), so we
+ * send an explicit zero-length "keepalive" envelope whenever nothing
+ * real has gone out recently, and declare the link down if nothing --
+ * real or keepalive -- has arrived in a while. */
+#define KEEPALIVE_INTERVAL_US  (1000 * 1000)  /* send a keepalive after this long with nothing sent */
+#define LINK_TIMEOUT_US        (3000 * 1000)  /* declare link down after this long with nothing received */
+
 typedef struct {
     esp_eth_mac_t parent;
     esp_eth_mediator_t *eth;
@@ -40,11 +49,34 @@ typedef struct {
     SemaphoreHandle_t tx_lock;
     TaskHandle_t task;
     volatile bool running;
+    volatile bool link_up;      /*!< MAC-owned link state -- see notify_link() */
+    volatile int64_t last_tx_us;
+    volatile int64_t last_rx_us;
 } esp32link_mac_uart_t;
 
 static inline esp32link_mac_uart_t *to_impl(esp_eth_mac_t *mac)
 {
     return __containerof(mac, esp32link_mac_uart_t, parent);
+}
+
+/* This driver -- not the PHY -- owns link-state detection, since
+ * there's no real physical-layer signal to poll: "link up" here
+ * genuinely means "the peer's software has proven itself alive
+ * recently". The PHY object still exists (the esp_eth framework
+ * requires one) but goes dormant after its one initial call, since
+ * its own internal state never changes again -- this is the real
+ * source of truth from here on. Only notifies on an actual
+ * transition, same guard as esp32link_phy.c's get_link/set_link. */
+static void notify_link(esp32link_mac_uart_t *emac, bool up)
+{
+    if (emac->link_up == up) {
+        return;
+    }
+    emac->link_up = up;
+    ESP_LOGI(TAG, "link %s", up ? "up" : "down");
+    if (emac->eth) {
+        emac->eth->on_state_changed(emac->eth, ETH_STATE_LINK, (void *)(up ? ETH_LINK_UP : ETH_LINK_DOWN));
+    }
 }
 
 /* ---- SLIP encode/send ---- */
@@ -69,7 +101,9 @@ static esp_err_t uart_send_frame(esp32link_mac_uart_t *emac, const uint8_t *payl
     envelope[0] = ESP32LINK_PROTO_VERSION;
     envelope[1] = (uint8_t)(len >> 8);
     envelope[2] = (uint8_t)(len & 0xFF);
-    memcpy(&envelope[3], payload, len);
+    if (len) {
+        memcpy(&envelope[3], payload, len);
+    }
     uint16_t crc = esp32link_crc16(envelope, 3 + len);
     envelope[3 + len]     = (uint8_t)(crc >> 8);
     envelope[3 + len + 1] = (uint8_t)(crc & 0xFF);
@@ -90,7 +124,7 @@ static esp_err_t uart_send_frame(esp32link_mac_uart_t *emac, const uint8_t *payl
 
 static void deliver_envelope(esp32link_mac_uart_t *emac, const uint8_t *envelope, size_t total)
 {
-    if (total < 5) { /* version + len(2) + crc(2), zero-length payload allowed but pointless */
+    if (total < 5) { /* version + len(2) + crc(2); zero-length payload is valid (keepalive) */
         return;
     }
     uint8_t version = envelope[0];
@@ -109,6 +143,16 @@ static void deliver_envelope(esp32link_mac_uart_t *emac, const uint8_t *envelope
         ESP_LOGW(TAG, "CRC mismatch, dropping frame (len=%u)", len);
         return;
     }
+
+    /* Any validly-framed envelope -- keepalive or real -- is proof the
+     * peer is alive and responsive right now. */
+    emac->last_rx_us = esp_timer_get_time();
+    notify_link(emac, true);
+
+    if (len == 0) {
+        return; /* keepalive -- nothing to deliver upward */
+    }
+
     uint8_t *buf = malloc(len);
     if (!buf) {
         ESP_LOGE(TAG, "no memory for received frame (len=%u)", len);
@@ -134,6 +178,15 @@ static void rx_task(void *arg)
     ESP_LOGI(TAG, "rx_task alive, reading uart port %d", emac->cfg.uart_port);
 
     while (emac->running) {
+        int64_t now = esp_timer_get_time();
+        if (now - emac->last_tx_us >= KEEPALIVE_INTERVAL_US) {
+            uart_send_frame(emac, NULL, 0); /* keepalive -- see notify_link() / file header */
+            emac->last_tx_us = now;
+        }
+        if (emac->link_up && (now - emac->last_rx_us) >= LINK_TIMEOUT_US) {
+            notify_link(emac, false);
+        }
+
         int n = uart_read_bytes(emac->cfg.uart_port, &byte, 1, pdMS_TO_TICKS(50));
         if (n <= 0) {
             continue;
@@ -261,7 +314,11 @@ static esp_err_t mac_transmit(esp_eth_mac_t *mac, uint8_t *buf, uint32_t length)
 {
     esp32link_mac_uart_t *emac = to_impl(mac);
     ESP_RETURN_ON_FALSE(length <= ESP32LINK_MAX_FRAME_LEN, ESP_ERR_INVALID_SIZE, TAG, "frame too large");
-    return uart_send_frame(emac, buf, (uint16_t)length);
+    esp_err_t err = uart_send_frame(emac, buf, (uint16_t)length);
+    if (err == ESP_OK) {
+        emac->last_tx_us = esp_timer_get_time(); /* real traffic also counts -- don't inject a redundant keepalive right after */
+    }
+    return err;
 }
 
 static esp_err_t mac_receive(esp_eth_mac_t *mac, uint8_t *buf, uint32_t *length)

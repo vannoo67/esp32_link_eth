@@ -56,7 +56,32 @@ typedef struct {
     TaskHandle_t task;
     volatile bool running;
     SemaphoreHandle_t handshake_sem; /* master role only: given from ISR on handshake rising edge */
+
+    volatile bool link_up;         /*!< MAC-owned link state -- see notify_link() */
+    int consecutive_timeouts;      /*!< master/slave task-local; not touched from other tasks */
 } esp32link_mac_spi_t;
+
+/* Same reasoning and pattern as esp32link_mac_uart.c's notify_link():
+ * the MAC owns link-state detection here, not the PHY, since there's
+ * no real physical-layer signal to poll. Unlike UART, SPI needs no
+ * added keepalive frame -- the master/slave handshake protocol already
+ * means the two sides are continuously exchanging transactions (mostly
+ * empty ones) as a side effect of normal operation, so "link up" is
+ * just "transactions are still completing", detected via the timeouts
+ * already present in both roles' wait calls below. */
+#define LINK_DOWN_AFTER_CONSECUTIVE_TIMEOUTS  3  /* at ~1s per timeout, matches UART's 3s LINK_TIMEOUT_US */
+
+static void notify_link(esp32link_mac_spi_t *emac, bool up)
+{
+    if (emac->link_up == up) {
+        return;
+    }
+    emac->link_up = up;
+    ESP_LOGI(TAG, "link %s", up ? "up" : "down");
+    if (emac->eth) {
+        emac->eth->on_state_changed(emac->eth, ETH_STATE_LINK, (void *)(up ? ETH_LINK_UP : ETH_LINK_DOWN));
+    }
+}
 
 static inline esp32link_mac_spi_t *to_impl(esp_eth_mac_t *mac)
 {
@@ -148,13 +173,23 @@ static void master_task(void *arg)
         xSemaphoreGive(emac->handshake_sem);
     }
 
+    emac->consecutive_timeouts = 0;
+
     while (emac->running) {
         /* Block for a genuine edge, not a polled level -- see the
          * comment on handshake_isr / the file's framing notes for why
          * level-polling here is unreliable (can't distinguish "stale
          * high from the previous transaction" from "freshly armed"). */
         if (xSemaphoreTake(emac->handshake_sem, pdMS_TO_TICKS(1000)) != pdTRUE) {
-            continue; /* just a timeout, loop back and check emac->running */
+            /* The slave normally re-arms and signals within
+             * milliseconds under all conditions, even idle -- a full
+             * 1s of silence here is already abnormal. Still require a
+             * few in a row before declaring down, so one transient
+             * scheduling hiccup doesn't flap the link state. */
+            if (++emac->consecutive_timeouts >= LINK_DOWN_AFTER_CONSECUTIVE_TIMEOUTS) {
+                notify_link(emac, false);
+            }
+            continue;
         }
 
         tx_item_t item;
@@ -177,6 +212,11 @@ static void master_task(void *arg)
             ESP_LOGW(TAG, "spi_device_transmit failed: %s", esp_err_to_name(err));
             continue;
         }
+        /* A completed transaction -- post-handshake-fix -- can only
+         * happen if the slave was genuinely armed and participating,
+         * so this is solid proof of life. */
+        emac->consecutive_timeouts = 0;
+        notify_link(emac, true);
         deliver_if_present(emac, rx_slot);
     }
 
@@ -215,12 +255,23 @@ static void slave_task(void *arg)
     spi_slave_queue_trans(emac->cfg.spi_host_id, &trans, portMAX_DELAY);
     gpio_set_level(emac->cfg.gpio_handshake, 1);
 
+    emac->consecutive_timeouts = 0;
+
     while (emac->running) {
         spi_slave_transaction_t *result = NULL;
         esp_err_t err = spi_slave_get_trans_result(emac->cfg.spi_host_id, &result, pdMS_TO_TICKS(1000));
         if (err != ESP_OK || !result) {
+            /* A full 1s with the master never clocking a transaction
+             * we're already armed for is abnormal under normal
+             * operation. Require a few in a row before declaring
+             * down, same reasoning as the master's side. */
+            if (++emac->consecutive_timeouts >= LINK_DOWN_AFTER_CONSECUTIVE_TIMEOUTS) {
+                notify_link(emac, false);
+            }
             continue; /* still armed and waiting -- handshake stays high */
         }
+        emac->consecutive_timeouts = 0;
+        notify_link(emac, true);
         gpio_set_level(emac->cfg.gpio_handshake, 0); /* consumed; briefly not ready while we re-arm */
 
         int just_completed = active;

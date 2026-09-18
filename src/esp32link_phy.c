@@ -59,14 +59,18 @@ static esp_err_t phy_reset_hw(esp_eth_phy_t *phy)
 static esp_err_t phy_init(esp_eth_phy_t *phy)
 {
     ESP_LOGI(TAG, "phy_init called");
-    esp32link_phy_t *impl = to_impl(phy);
-    /* NOTE: previously this called on_state_changed(LINK_UP) here,
-     * unconditionally, during init(). That happens before
-     * esp_eth_start() -- too early for esp_eth core's state machine
-     * to react to it, which looks like the reason mac->start() was
-     * never reached. Link-up is now only reported from get_link(),
-     * which esp_eth core is expected to poll after start() begins. */
-    impl->link = ETH_LINK_UP;
+    /* Deliberately does NOT set link = ETH_LINK_UP anymore. The MAC
+     * drivers (esp32link_mac_spi.c / esp32link_mac_uart.c) now own
+     * link-state detection and call the mediator directly, since
+     * "link" here genuinely means "the peer's software has proven
+     * itself alive recently" -- not something a PHY-level check can
+     * determine. This PHY stays permanently at ETH_LINK_DOWN and never
+     * notifies on its own, going fully dormant after this point; get_link()
+     * below is guarded to only notify on an actual change from that
+     * fixed DOWN state, so in practice it never fires either. Left in
+     * place only because the esp_eth framework requires a PHY object
+     * to exist, not because it does anything meaningful anymore. */
+    (void)phy;
     return ESP_OK;
 }
 

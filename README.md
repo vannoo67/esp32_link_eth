@@ -150,6 +150,55 @@ overrides:
         path: "/path/to/local/esp32_link_eth"
 ```
 
+## Link detection
+
+Neither transport has a real physical-layer link signal the way a
+cabled Ethernet PHY does -- "link up" here means "the peer's software
+has proven itself alive recently", which is fundamentally a MAC-level
+concern, not a PHY-level one. Both MAC drivers now own this directly:
+
+- **SPI**: needs no added protocol -- the master/slave handshake
+  design already means the two sides continuously exchange
+  transactions (mostly empty ones) as a side effect of normal
+  operation, so "link up" is just "transactions are still completing".
+  Detected via the existing 1-second timeouts already present in both
+  roles' wait calls; 3 consecutive timeouts (~3s) declares the link
+  down, a single successful transaction declares it back up. Since a
+  transaction can only complete post-handshake-fix if the slave was
+  genuinely armed and participating, this is a solid liveness signal,
+  not a guess.
+- **UART**: genuinely silent when idle, so a `length == 0` envelope is
+  now reserved as an explicit keepalive (a real Ethernet frame is
+  never 0 bytes, so this can't collide with real traffic). Sent
+  whenever nothing -- real or keepalive -- has gone out in the last
+  second; the link is declared down if nothing has been *received* in
+  3 seconds, back up on the next valid receipt of either kind. No wire
+  format change (same envelope shape), so no protocol version bump.
+
+Both report through `esp_eth_mediator_t::on_state_changed()` directly
+from the MAC, using the same "only notify on an actual transition"
+guard the PHY already used. The PHY object still exists (the
+framework requires one) but is now permanently dormant -- it never
+sets `link = ETH_LINK_UP` on its own anymore, so it never has anything
+to report; the MAC is the sole source of truth.
+
+**Practical consequence**: the link will no longer show as "up"
+immediately at boot the way it did before. It now takes however long
+proof of life genuinely takes -- for SPI, typically well under a
+second once both boards are running; for UART, up to ~1 second (one
+keepalive round-trip). Real, not just cosmetic: `ETHERNET_EVENT_CONNECTED`
+now fires once, when the peer is actually confirmed present, not
+optimistically at driver init.
+
+**Flagging honestly**: a MAC calling `on_state_changed()` directly,
+rather than a PHY, is not the pattern any real esp_eth driver in
+ESP-IDF uses -- the framework doesn't forbid it (the mediator doesn't
+care which caller invokes it), but it's genuinely atypical usage, and
+this is its first exercise on real hardware. Re-run `loopback_test`
+before trusting this in a router/bridge build: unplug one board
+mid-run and confirm the other side's console logs `link down` within
+a few seconds, then reconnect and confirm `link up` reappears.
+
 ## Known gaps / next steps
 
 - SPI clock ceiling: clean up to ~12 MHz on hookup-wire jumper wiring,
