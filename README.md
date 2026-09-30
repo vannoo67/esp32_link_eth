@@ -226,18 +226,39 @@ code and want to do both, that's not redundant -- it just adds margin.
 
 ## Known gaps / next steps
 
-- SPI clock ceiling: clean up to ~12 MHz on hookup-wire jumper wiring,
-  corrupted reads from the slave side starting at 15 MHz — consistent
-  with ESP32's SPI *slave* mode having a lower reliable clock ceiling
-  than master mode (the slave's output settling time becomes the
-  bottleneck as clock rises, not the master's sampling). Likely has
-  more headroom with shorter wires or a real PCB trace, not yet tested.
-  Tried switching both sides to SPI mode 1 (CPHA=1) hoping for extra
-  settling margin -- this made things reliably *worse*, breaking even
-  the previously-clean 10 MHz case, consistent with known ESP32 SPI
-  slave-mode quirks around CPHA=1. Stick with mode 0; if you need more
-  headroom than 10 MHz, look at wiring quality (specifically the MISO
-  line) before touching SPI mode again.
+- **SPI clock ceiling is a documented hardware limit, not a wiring
+  problem**: ESP32's SPI *slave* peripheral has a hard maximum input
+  clock of fAPB/8 = 10 MHz (ESP32 Technical Reference Manual, ch. 5.4)
+  -- fixed in silicon, independent of wiring, resistors, or PCB
+  layout. This fully explains the whole earlier investigation: clean
+  to ~12 MHz on bare hookup wire, corrupted from 15 MHz (right past
+  the spec limit, with some real-world guard-band making 12 work in
+  practice); adding 100Ω series resistors (even correctly, source-
+  terminated) *reduced* the usable range to ~5 MHz, since any added
+  delay eats into an already-paper-thin margin at a hard wall rather
+  than a soft one; twisted-pair wiring with *no* series resistors
+  performed best of everything tried, but even that combination still
+  showed sparse errors (~1/minute) at a *requested* 10 MHz on one
+  validated real build, and only became fully clean (10+ minutes, zero
+  errors) once dropped to a requested 9 MHz (~8.89 MHz actual, since
+  ESP-IDF always rounds down to the nearest achievable divisor of the
+  80 MHz APB clock). **Practical takeaway: treat 10 MHz as a wall, not
+  a target** -- budget real margin below it (8-9 MHz requested is a
+  reasonable starting point, per the Kconfig default), and always
+  validate your own wiring with `loopback_test` run for several
+  minutes, not a quick check, since corruption this close to the
+  ceiling can be sparse enough to hide in a short test.
+- One further, less certain finding from the same investigation: very
+  tight twisting of multiple twisted-pair bundles routed close
+  together *increased* the error rate versus a more loosely twisted
+  bundle. Plausible mechanism -- tight multi-pair bundling can raise
+  capacitive coupling *between* pairs, not just help crosstalk
+  *within* each pair -- but unconfirmed without a scope; worth trying
+  if you hit a similar wall, not something to assume as fact.
+- Tried switching both sides to SPI mode 1 (CPHA=1) hoping for extra
+  settling margin -- this made things reliably *worse*, breaking a
+  previously-clean case, consistent with known ESP32 SPI slave-mode
+  quirks around CPHA=1. Stick with mode 0.
 - No retry/ack layer — a dropped or corrupted frame (bad CRC, version
   mismatch) is just discarded, same as a real Ethernet link would do
   under packet loss; upper-layer protocols (TCP, ARP retries) are

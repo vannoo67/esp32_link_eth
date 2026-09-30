@@ -45,21 +45,36 @@ menu "ESP32 Link Ethernet (direct board-to-board link)"
         depends on ESP32LINK_TRANSPORT_SPI
         int "SPI clock speed (MHz)"
         range 1 40
-        default 10
+        default 8
         help
             Master role only -- ignored on a slave build (still needs
             a value defined either way, so it's shown rather than
             hidden here; "visible if" on a plain config isn't
             supported by ESP-IDF's Kconfig parser).
 
-            Start conservative (5-10 MHz) on breadboard/jumper wiring;
-            raise it once the link is proven reliable. ESP32's SPI
-            *slave* mode has a lower reliable clock ceiling than
-            master mode (the slave's output settling time becomes the
-            bottleneck as clock rises) -- expect this number to be
-            capped well below what the W5500 builds in these forks run
-            at (up to 80 MHz there, but against a chip built to be a
-            fast SPI slave, on a clean PCB trace).
+            ESP32's SPI *slave* peripheral has a documented hard
+            ceiling of fAPB/8 = 10 MHz (ESP32 Technical Reference
+            Manual, ch. 5.4) -- not a soft, wiring-dependent limit,
+            a fixed constraint on the chip itself. No amount of
+            wiring, resistors, or PCB layout can exceed it. Treat
+            10 MHz as a wall, not a target: real-world margin at
+            that exact number tends to be thin to nonexistent --
+            one validated build still saw sparse errors at a
+            *requested* 10 MHz (~1/minute) even with good wiring
+            (twisted pair, no series resistors), and only settled
+            fully clean once dropped to 8-9. This component's
+            default of 8 reflects that real-world margin, not the
+            theoretical ceiling. ESP-IDF always rounds your
+            requested value down to the nearest achievable divisor
+            of the 80 MHz APB clock (80, 40, 26.67, 20, 16, 13.33,
+            11.43, 10, 8.89, 8, ...) -- e.g. requesting 9 actually
+            runs at ~8.89.
+
+            Validate for your own wiring with loopback_test before
+            trusting a number in a real build -- run it for several
+            minutes at minimum, since corruption at speeds near the
+            ceiling can be sparse enough (seconds to minutes between
+            events) that a short test looks clean when it isn't.
 
     config ESP32LINK_SPI_GPIO_MOSI
         depends on ESP32LINK_TRANSPORT_SPI
